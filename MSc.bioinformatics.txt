@@ -1,0 +1,223 @@
+Overall outline (with suggested programs):
+
+Trim/filter reads based on quality, and trim adapters (trimgalore)
+Assemble reads (rainbow/velvet/abyss)
+Get assembly stats (QUAST- in galaxy.sun.ac.za)
+Look at reads in basespace, use FastQC tools to subsample reads so that each population has equal number of reads to begin with (you can also trim adapters and trim based on quality with this same tool if you do not want to use trimgalore)
+Map reads onto reference (bwa-mem)
+Convert sam files created in previous step to bam and sort bam files (samtools)
+Get mapping stats (samtools)
+Create a pileup file for each individual population (samtools)
+Calculate diversity indices for each individual population (popoolation1)
+Create a mulitple pileup (mpileup) including all populations (samtools or Galaxy)
+Create a sync file from multiple pileup (popoolation2)
+Calculate allele frequencies / create a .rc file (popoolation2)
+Calculate Fst 
+Option 1: Popoolation2 sliding.fst script (does not give p-values)
+Option 2: From genepop file (input genepop file into another program that calculates FST like arlequin, genodive, heirstat, diveRsity, adgenet)
+Get outlier SNPs
+Option 1: Bayescan
+1. Create Genepop file from sync file (popoolation2 & custom script) -keep in mind that this genepop conversion takes a subsample from your data, therefore anything calculated from this genepop file will not describe the entire dataset)
+2. Convert genepop file to bayescan file (PDG spider)
+3. Run Bayescan (don’t have to use script, but is included anyway)
+4. Plot Bayescan results (R studio)
+Option 2: Empirical outliers with Popoolation 
+Option 3: Selestim & PoolHMM (I have scripts for both of these, but in my personal use they took weeks to run on the cluster and still didn’t finish. I don’t know how much they even completed with 1000 hours and 50 CPUs…so I just gave up on running these)
+Option 4: BayEnv (i did not use this myself, so i did not include scripts)
+Option 5: pcadapt NB* looks like this package is depreciated (R package, also not included, but runs with pooled samples- online tutorial is super easy. To get input file, take your maa values from your .rc file to get the allele frequencies per population (for example convert 2/4 to 0.5), then transform the table so populations are rows and allele freqs are columns)
+
+Note that all parameters should be tested and optimised for each dataset. Additional information on each program can be found in the various manuals.
+### TRIMMING ###
+
+TrimGalore script:
+
+module load app/TrimGalore!
+
+trim_galore --paired -q 20 -e 0.01 --length 30 -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC -a2 AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT -stringency 10 p1.read1.fq p1.read2.fq
+
+trim_galore --paired -q 20 -e 0.01 --length 30 -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC -a2 AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT -stringency 10 p2.read1.fq p2.read2.fq
+
+
+### ASSEMBLY ###
+
+##Velvet
+
+# Run velvetoptimiser for each population- qsub velvt.opt.sh
+VelvetOptimiser.pl -s 19 -e 31 -t 8 -f '-shortPaired -separate -fastq p1.read1.fq p1.read2.fq'
+
+# Running Velvet h ( velvth.sh)
+velveth /home/esnielsen/work/limpet_velvt_New/ 71 -shortPaired -separate -fastq p1.read1.fq p1.read2.fq
+
+# Running Velvetg  (velvtg.sh)
+velvetg /home/esnielsen/work/limpet_velvt_New/  -ins_length 518 -exp_cov 3 -min_contig_lgth 200 -scaffolding no -unused_reads yes
+
+# Combine contigs (comb.contig.sh) and perform assembly with caps (cap3.sh)
+nohup cap3 All_contig.seq
+
+# Create the ‘reference sequence’ (create.ref.sh)
+cat All_contig.fa.cap.contigs  All_contig.fa.cap.singlets > ref.seq
+
+# Combine all the sequences from each single de novo assembly- comb.contig.sh script:
+cat *contigs.fa >All_contig.fa
+
+
+##Abyss
+
+abyss-pe np=16 k=51 v=-v name=abyss.trim.k51.n16.m300.wt96 lib='p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11' p1='p1.read1.fq p1.read2.fq' p2='p2.read1.fq p2.read2.fq' p3='p3.read1.fq p3.read2.fq' p4='p4.read1.fq p4.read2.fq' p5='p5.read1.fq p5.read2.fq' p6='p6.read1.fq p6.read2.fq' p7=
+'p7.read1.fq p7.read2.fq' p8='p8.read1.fq p8.read2.fq' p9='p9.read1.fq p9.read2.fq' p10='p10.read1.fq p10.read2.fq' p11='p11.read1.fq p11.read2.fq'
+
+
+##Rainbow
+
+#First step concatenates reads into one forward and one reverse fastq file
+cat ./assembly/*.R1_val_1.fq > forward concatenate all files in the assembly directory ending with this suffix and call the resulting file 'forward'
+cat ./assembly/*.R2_val_2.fq > reverse
+
+#Rainbow now clusters and assembles
+rainbow cluster -1 forward -2 reverse > cat.rbcluster.out 2> log Creates a 'log' file from the clustering
+rainbow div -i cat.rbcluster.out -o cat.rbdiv.out -f $1 This $1 needs to be $your frequency (see above)
+rainbow merge -a -i cat.rbdiv.out -o cat.rbasm.out -N 1000
+perl /path to/select_best_rbcontig.pl cat.rbasm.out > rainbow This “path to” needs to be changed to the path to your files
+
+#Renames contigs to sequential numbers for simplicity
+fastx_renamer -n COUNT -i rainbow -o reference
+
+
+### MAPPING ###
+
+#BWA MEM 
+bwa index reference
+bwa mem -R '@RG\tID:pop1\tSM:B\tLB:library1' reference B.tg.r1.fastqsanger B.tg.r2.fastqsanger -a -t 16 -T 10 > B.sam
+bwa mem -R '@RG\tID:pop2\tSM:BR\tLB:library2' reference BR.tg.r1.fastqsanger BR.tg.r2.fastqsanger -a -t 16 -T 10 > BR.sam
+bwa mem -R '@RG\tID:pop3\tSM:K\tLB:library3' reference K.tg.r1.fastqsanger K.tg.r2.fastqsanger -a -t 16 -T 10 > K.sam
+
+
+### POST MAPPING FILTERING ###
+
+# SAM to BAM in Samtools 
+samtools view -q 20 -bS L_SP.sam > L_SP.bam
+
+# Sort BAM file 
+samtools sort -T L.SP.sorted -o L.SP.sorted.bam L_SP.bam
+
+# Index BAM files 
+samtools index q10.uv.p1.sorted.bam
+
+# Get the mapping stats 
+samtools idxstats q10.uv.rd.p1.sorted.bam
+
+# Stats for your alignments 
+samtools stats -c 1,1000,1 -q 20 -r referenceC30 CNN30_sorted.bam
+
+# Filtering BAM
+samtools view -q 20 -f 0x0002 -F 0x0004 -F 0x0008 -b inputfile > outputfile
+
+# Subsample reads
+# With our pooled samples it is best to sub-sample the bam files to that each pool (or population) has roughly the same amount of reads (otherwise the genomic diversity analyses might be biased by sequencing differences between pools). Here we subsample to the mean number of reads across pools.
+
+samtools view -s 0.25 -b psw.sorted.bam > psw.sub.bam
+
+# SAMtools mpileup 
+## NB: What is key here is to use samtools version 1. Popoolation1/2 is not compatible with any newer versions of sync files
+
+samtools mpileup -d 10000 -Q 20 -B -f L.ref.fa L.SS.sorted.bam L.SJ.sorted.bam L.SL.sorted.bam L.SB.sorted.bam L.SH.sorted.bam L.SP.sorted.bam > L.6pop.pileup
+
+
+### POPOOLATION SCRIPTS ###
+
+# Popoolation1 generate pi, theta, and snp files
+
+perl /apps/PoPoolation/1.2.2/Variance-sliding.pl --fastq-type sanger --measure pi --input Gal_EN7_velvt.pileup --min-count 2 --min-coverage 10 --max-coverage 500 --min-qual 20 --pool-size 80 --window-size 100 --step-size 100 --output Gal_EN7_cov20.velvt.pi --snp-output pop3.gal.l.v.snps
+
+# Only report pi values from areas with SNPs (instead of scrolling through a large document to find positive pi or theta values) use the following (print.list):
+
+more Gal_EN7_cov20.velvt.pi|awk '{if($5!="na")print}' > SP.pi.value.ls
+
+# Popoolation2- create a sync file from mpileup
+mpileup2sync.pl --fastq-type sanger --min-qual 20 --input hc.q20.mpileup --output hc.q20.sync 
+
+# Calculate SNP frequency differences per population (snp.diff.sh) (this gives you the number of SNPs and their allele counts)
+snp-frequency-diff.pl --input q20.uv.sync --output-prefix q20.cov20_diff --min-count 4 --min-coverage 40 --max-coverage 500
+
+
+# Calculate fst for each individual snp 
+fst-sliding.pl --input allpops.sync --output allpops.fst --suppress-noninformative --min-count 4 --min-coverage 40 --max-coverage 500 --pool-size 80 --window-size 100 --step-size 100 
+
+more allpops.fst|awk '{if($3!="0")print}' > allpops.fst.value.ls
+
+# Calculating number of SNPs and number of private SNPs
+
+# This is calculated from the maa columns of the _rc file - which are the major allele frequencies. It will look like a fraction, so 2/4 means 2 out of the 4 alleles are of the described SNP. The 4 is the coverage. If the fraction is 0/4, then the SNP is not existent in that population
+# If a SNP is specific to a certain population, the maa will not be equal to the total number of count in this population but maa should be equal to the total number of counts in other populations. For example, maa is like this in three populations, 42/42 87/87 124/125, and it suggests this SNP is a private SNP for the third populations. The opposite can be said for mia columns.
+
+#Print maa columns
+more q20.cov20_diff_rc|awk '{if($4==2)print $10 "\t" $11 "\t" $12 "\t" $13 "\t" $14 "\t" $15 "\t" $16 "\t" $17}' > marina.maa.4.10.500.txt
+
+#Print number of SNPs per pool
+more marina.maa.4.10.500.txt|awk '{if ($1!=$2) print}' > popO.num.snps.txt
+more marina.maa.4.10.500.txt|awk '{if ($3!=$4) print}' > popB.num.snps.txt
+more marina.maa.4.10.500.txt|awk '{if ($5!=$6) print}' > popL1.num.snps.txt
+
+##The MAA fraction needs meet both of these conditions. It cannot equal 0 (eg 0/21) or 1 (21/21)
+More popO.num.snps.txt | awk ‘{if ($1!= “0”) print}’ > popO.num.snps.txt
+
+#Print private SNPs per pool
+more *maa.txt|awk '{if($1!=$2&&$3==$4&&$5==$6&&$7==$8&&$9==$10&&$11==$12)print}' > pop1.prv.txt
+more *maa.txt|awk '{if($1==$2&&$3!=$4&&$5==$6&&$7==$8&&$9==$10&&$11==$12)print}' > pop2.prv.txt
+
+Then..
+more pop1.prv.txt | awk ‘{if ($1!= “0”) print}’ > pop1.num.prv.snps.txt
+
+
+### Create GenePop files
+# The sync2genepop conversion step is really difficult to manage for all loci at once, you need to write custom scripts to do it for more than one locus at a time. I will outline what I did below:
+
+
+# First you will need to run the 'snp-frequency-diff.pl’ script to get an _rc file with all of your SNPs. Then:
+
+# a) build up a file containing all reference sequences with SNPs you are interested, let's call it region.txt
+
+more *_rc|awk '{print $1 "\t" $2}' > region.txt
+
+# b) run the following to create a script including sync2genepop commands for all SNPs in your region.txt file:
+
+more region.txt|awk '{print "perl /apps/PoPoolation/2.svn204/export/subsample_sync2GenePop.pl --input ‘YOUR SYNC FILE' --output "$1".GenePop --method fraction --min-count 4 --target-coverage 40 --max-coverage 500 --region "$2" --diploid"}' > sync2GenePop.sh
+
+This script is saying, for every snp in our region file, write the sync2genepop script with that snp as the region. The sync2Genepop script produced here requires you to specify a region to subsample from. To include all snps into our genepop file, we run the script for each individual snp.  
+
+Note: use the same min-count, and max-coverage as above with 'snp-frequency-diff.pl'. Target-coverage= number individuals/pool. 
+
+# c) submit the ’sync2GenePop.sh’ script created in the previous step:
+
+nohup sh sync2GenePop.sh
+
+# d) you merge all XX.GenePop files from the second step into one file with the attached perl script, and the pos.txt tells you the exact order SNPs you merge. (I have attached the ‘merge.gpop.pl’ file, put this in the same directory and fun the following):
+
+/usr/bin/perl merge.gpop.pl
+
+# e) Add gt to each line -  gt.sh (again make sure gt.pl is in that directory)
+
+/usr/bin/perl gt.pl pool_GenePop.txt > pool_GenePop.txt.md 
+
+# f) Open up the genpop file in a text editor and add “Pop” separating the different pools. I had 40 individuals so it was added every 40 lines. You will also need to add the number of loci at the beginning. I have attached one of my genepop files for you to compare yours to. 
+
+
+### Use PGDSpider to convert GenePop file to BayeScan file ###
+
+nohup java -Xmx1024m -Xms512m -jar PGDSpider_2.0.2.0/PGDSpider2-cli.jar -inputfile Pool_GenePop.txt -inputformat GENEPOP -outputfile BayeScan.txt -outputformat GESTE_BAYE_SCAN -spid PGDSpider_2.0.2.0/GENEPOP_to_GESTE_BAYE_SCAN.spid &
+
+
+### Run BayeScan ###
+
+#I used the GUI, but here is the script below if you wish to run it on the cluster
+
+nohup BayeScan2.1/source/bayescan_2.1 BayeScan.txt -snp -od . -threads 8 -pr_odds 100 -out_pilot -out_freq&
+
+
+### Plotting Bayescan Results ###
+
+library(ggplot2)
+library(diveRsity)
+source(“C:/Users/esnielsen/Desktop/plot_R.r”)
+plot_bayescan(““C:/Users/esnielsen/Desktop/bayescan_output_fst.txt”, FDR = 0.05)
+
